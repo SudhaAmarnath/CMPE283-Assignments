@@ -1,0 +1,95 @@
+diff --git a/arch/x86/kvm/cpuid.c b/arch/x86/kvm/cpuid.c
+index 7bcfa61375c0..bb584a3ed826 100644
+--- a/arch/x86/kvm/cpuid.c
++++ b/arch/x86/kvm/cpuid.c
+@@ -936,6 +936,13 @@ bool kvm_cpuid(struct kvm_vcpu *vcpu, u32 *eax, u32 *ebx,
+ }
+ EXPORT_SYMBOL_GPL(kvm_cpuid);
+ 
++u32 kvm_register_eax;
++u32 kvm_register_ebx;
++u32 kvm_register_ecx;
++EXPORT_SYMBOL(kvm_register_eax);
++EXPORT_SYMBOL(kvm_register_ebx);
++EXPORT_SYMBOL(kvm_register_ecx);
++
+ int kvm_emulate_cpuid(struct kvm_vcpu *vcpu)
+ {
+ 	u32 eax, ebx, ecx, edx;
+@@ -945,7 +952,20 @@ int kvm_emulate_cpuid(struct kvm_vcpu *vcpu)
+ 
+ 	eax = kvm_register_read(vcpu, VCPU_REGS_RAX);
+ 	ecx = kvm_register_read(vcpu, VCPU_REGS_RCX);
+-	kvm_cpuid(vcpu, &eax, &ebx, &ecx, &edx, true);
++
++	if(eax == 0x4FFFFFFF) {
++		u64 total_cycles = ((uint64_t)kvm_register_ebx) << 32 | kvm_register_ecx;
++		printk("Special CPUID leaf 0x4FFFFFF function is called..\n");
++		printk("  Copying these total number of exits %u to eax..\n", kvm_register_eax);
++		printk("  Copying these total number of cpu cycles %llu to (hi-dec)ebx=%u and (lo-dec)ecx=%u..\n", total_cycles, kvm_register_ebx, kvm_register_ecx);
++		kvm_cpuid(vcpu, &eax, &ebx, &ecx, &edx, true);
++		eax = kvm_register_eax;
++		ebx = kvm_register_ebx;
++		ecx = kvm_register_ecx;
++	} else {
++		kvm_cpuid(vcpu, &eax, &ebx, &ecx, &edx, true);
++	}
++
+ 	kvm_register_write(vcpu, VCPU_REGS_RAX, eax);
+ 	kvm_register_write(vcpu, VCPU_REGS_RBX, ebx);
+ 	kvm_register_write(vcpu, VCPU_REGS_RCX, ecx);
+diff --git a/arch/x86/kvm/vmx.c b/arch/x86/kvm/vmx.c
+index 4555077d69ce..a47fbcf7c494 100644
+--- a/arch/x86/kvm/vmx.c
++++ b/arch/x86/kvm/vmx.c
+@@ -10510,6 +10510,15 @@ static void dump_vmcs(void)
+  * The guest has exited.  See if we can fix it or if we need userspace
+  * assistance.
+  */
++
++
++extern u32 kvm_register_eax;
++extern u32 kvm_register_ebx;
++extern u32 kvm_register_ecx;
++
++static int total_exit_counter = 0;
++static u64 total_cpu_cycles = 0;
++
+ static int vmx_handle_exit(struct kvm_vcpu *vcpu)
+ {
+ 	struct vcpu_vmx *vmx = to_vmx(vcpu);
+@@ -10597,7 +10606,33 @@ static int vmx_handle_exit(struct kvm_vcpu *vcpu)
+ 
+ 	if (exit_reason < kvm_vmx_max_exit_handlers
+ 	    && kvm_vmx_exit_handlers[exit_reason])
+-		return kvm_vmx_exit_handlers[exit_reason](vcpu);
++	{
++		int kvm_vmx_exit_return_value;
++		u64 rdtsc_start_timestamp, rdtsc_end_timestamp, current_exit_cycles;
++
++		// Increment total_exit_counter everytime when VM exits
++		total_exit_counter++;
++
++		// Calculate the total cpu cycles
++		rdtsc_start_timestamp = rdtsc();
++		kvm_vmx_exit_return_value = kvm_vmx_exit_handlers[exit_reason](vcpu);
++		rdtsc_end_timestamp = rdtsc();
++		current_exit_cycles = rdtsc_end_timestamp - rdtsc_start_timestamp;
++		total_cpu_cycles = total_cpu_cycles + current_exit_cycles;
++
++		// Save the total number of exits in kvm_register_eax which would be copied to eax later
++		kvm_register_eax = total_exit_counter;
++
++		// Save the high 32 bits of total cpu cycles in kvm_register_ebx which would be copied to ebx later
++		kvm_register_ebx = (uint32_t)((total_cpu_cycles & 0xFFFFFFFF00000000LL) >> 32);
++
++		// Save the low 32 bits of total cpu cycles in kvm_register_ebc which would be copied to ecx later
++		kvm_register_ecx = (uint32_t)(total_cpu_cycles & 0xFFFFFFFFLL);
++
++		return kvm_vmx_exit_return_value;
++
++	}
++
+ 	else {
+ 		vcpu_unimpl(vcpu, "vmx: unexpected exit reason 0x%x\n",
+ 				exit_reason);
